@@ -3,7 +3,7 @@
 ![Python](https://img.shields.io/badge/Python-3.14-blue?logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?logo=fastapi&logoColor=white)
 ![Pydantic](https://img.shields.io/badge/Pydantic-v2-e92063?logo=pydantic&logoColor=white)
-![Tests](https://img.shields.io/badge/tests-84%20passed-brightgreen)
+![Tests](https://img.shields.io/badge/tests-88%20passed-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
 A FastAPI service that takes a single natural-language request and, with **no human in the loop**, autonomously:
@@ -160,8 +160,9 @@ OLLAMA_MODEL=llama3
 
 # --- Agent behaviour ----------------------------------------------------------
 MAX_REFLECTION_ROUNDS=2
-LLM_MAX_RETRIES=2
+LLM_MAX_RETRIES=4
 REQUEST_TIMEOUT_SECONDS=30
+LLM_MAX_CONCURRENCY=1
 ```
 
 | Variable | Default | Purpose |
@@ -172,8 +173,9 @@ REQUEST_TIMEOUT_SECONDS=30
 | `OLLAMA_HOST` | `http://localhost:11434` | local Ollama server URL |
 | `OLLAMA_MODEL` | `llama3` | Ollama model name |
 | `MAX_REFLECTION_ROUNDS` | `2` | max self-check/revise rounds before returning |
-| `LLM_MAX_RETRIES` | `2` | retry attempts (exponential backoff) per LLM call |
+| `LLM_MAX_RETRIES` | `4` | retry attempts per LLM call — honours the provider's `Retry-After` header on 429s, falls back to exponential backoff otherwise |
 | `REQUEST_TIMEOUT_SECONDS` | `30` | per-LLM-call HTTP timeout |
+| `LLM_MAX_CONCURRENCY` | `1` | max concurrent section-drafting LLM calls; Groq free-tier keys are commonly capped around 6000 tokens/minute, and a single multi-section document can use most of that alone, so this is kept low to avoid bursting past the limit |
 
 **Using Groq:** sign up at [console.groq.com](https://console.groq.com), create an API key, then set `GROQ_API_KEY` and `LLM_PROVIDER=groq`.
 **Using Ollama:** install from [ollama.com](https://ollama.com), `ollama pull llama3`, `ollama serve`, then set `LLM_PROVIDER=ollama`.

@@ -39,6 +39,23 @@ app = FastAPI(
     version="1.0.0",
 )
 
+# get_llm_client() performs a live provider health check (see app/llm_client.py),
+# which is worth paying for once, not on every request. Resolving it fresh per
+# request would mean an extra Groq API call on top of every single /agent call
+# -- pure overhead that also adds to rate-limit pressure on a free tier for no
+# benefit, since the provider practically never changes mid-process. Cached
+# lazily on first use rather than at import time, so tests that monkeypatch
+# LLM_PROVIDER before the first request still pick it up correctly.
+_llm_client = None
+
+
+def _resolve_llm_client():
+    global _llm_client
+    if _llm_client is None:
+        _llm_client = get_llm_client()
+        logger.info("LLM provider resolved for this server process: %s", _llm_client.name)
+    return _llm_client
+
 
 @app.get("/health", summary="Liveness check")
 def health() -> Dict[str, str]:
@@ -53,7 +70,7 @@ def health() -> Dict[str, str]:
 async def run_agent(payload: AgentRequest) -> AgentResponse:
     request_id = str(uuid.uuid4())
     logger.info("[%s] new request: %.80s", request_id, payload.request)
-    llm = get_llm_client()
+    llm = _resolve_llm_client()
 
     try:
         plan = create_plan(payload.request, llm)

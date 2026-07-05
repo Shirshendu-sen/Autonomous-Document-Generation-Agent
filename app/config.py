@@ -27,6 +27,14 @@ MAX_REFLECTION_ROUNDS = int(os.getenv("MAX_REFLECTION_ROUNDS", "2"))
 LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "2"))
 REQUEST_TIMEOUT_SECONDS = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "30"))
 
+# Caps how many section-drafting LLM calls run at once (see app/executor.py).
+# Documents with 7-9 sections would otherwise fire that many requests in the
+# same instant, which is enough to trip free-tier rate limits (observed with
+# Groq's free tier: a burst of 429s that can even starve out the reflection
+# self-check's own call). Bounding concurrency keeps most of the latency win
+# of parallel drafting without bursting past what the provider allows.
+LLM_MAX_CONCURRENCY = int(os.getenv("LLM_MAX_CONCURRENCY", "3"))
+
 MIN_REQUEST_LENGTH = 8
 MAX_REQUEST_LENGTH = 4000
 

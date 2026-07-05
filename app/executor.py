@@ -11,6 +11,13 @@ document run sequentially against a free-tier/local LLM is noticeably slower
 than the same document drafted in parallel. Lost coherence is partly
 recovered by giving every section the same shared context rather than
 nothing.
+
+Concurrency is bounded by ``config.LLM_MAX_CONCURRENCY`` (a semaphore) rather
+than left unlimited: a document with 7-9 sections firing that many requests
+in the same instant is enough to trip a free-tier provider's rate limit (e.g.
+Groq), which can cascade into the reflection self-check's own call being
+rate-limited too. Capping concurrency keeps most of the latency win while
+staying under typical free-tier limits.
 """
 from __future__ import annotations
 
@@ -19,6 +26,7 @@ import json
 import logging
 from typing import Any, Dict, List, Union
 
+from app import config
 from app.llm_client import LLMClient
 from app.schemas import Plan, PlanSection, SectionContent
 
@@ -75,20 +83,25 @@ def _parse_section_output(raw: str, section: PlanSection) -> Union[str, List[Dic
     return raw
 
 
-async def _draft_one(llm: LLMClient, plan: Plan, section: PlanSection) -> SectionContent:
+async def _draft_one(llm: LLMClient, plan: Plan, section: PlanSection, semaphore: asyncio.Semaphore) -> SectionContent:
     """Drafts a single section. The LLM call is a synchronous ``requests``
     call under the hood, so ``asyncio.to_thread`` moves it off the event
     loop -- this is what lets ``execute_plan`` run every section concurrently
-    without needing an async HTTP client."""
+    without needing an async HTTP client. ``semaphore`` bounds how many of
+    these run at once (see ``execute_plan``)."""
     prompt = _section_prompt(plan, section)
-    raw = await asyncio.to_thread(llm.generate, SECTION_SYSTEM_PROMPT, prompt, False)
+    async with semaphore:
+        raw = await asyncio.to_thread(llm.generate, SECTION_SYSTEM_PROMPT, prompt, False)
     content = _parse_section_output(raw, section)
     return SectionContent(id=section.id, title=section.title, content=content,
                            table_columns=section.table_columns, revised=False)
 
 
 async def execute_plan(plan: Plan, llm: LLMClient) -> List[SectionContent]:
-    """Drafts every section in the plan concurrently.
+    """Drafts every section in the plan concurrently, bounded to at most
+    ``config.LLM_MAX_CONCURRENCY`` in-flight LLM calls at once so a
+    many-section document doesn't burst past a free-tier provider's rate
+    limit (see module docstring).
 
     Note: if any section's LLM call exhausts its retries and raises
     ``LLMError``, ``asyncio.gather`` propagates it immediately -- this is
@@ -96,7 +109,8 @@ async def execute_plan(plan: Plan, llm: LLMClient) -> List[SectionContent]:
     failure would be worse than a clear, catchable error the caller can
     turn into a clean HTTP response.
     """
-    tasks = [_draft_one(llm, plan, section) for section in plan.sections]
+    semaphore = asyncio.Semaphore(config.LLM_MAX_CONCURRENCY)
+    tasks = [_draft_one(llm, plan, section, semaphore) for section in plan.sections]
     return await asyncio.gather(*tasks)
 
 
@@ -108,6 +122,15 @@ async def revise_section(llm: LLMClient, plan: Plan, section: PlanSection, issue
         f"\nPREVIOUS DRAFT WAS FLAGGED BY QUALITY REVIEW: {issue}\n"
         "Write a more complete, specific replacement that resolves this issue."
     )
+    if section.table_columns:
+        # Empirically, "write a more complete, specific replacement" alone is
+        # enough to make the model abandon the JSON-array table format and
+        # answer in prose instead, even though the system prompt already
+        # covers table formatting -- the revision instruction reads like a
+        # prose-writing request and dominates by recency. Re-assert the
+        # format explicitly so revised table sections don't silently
+        # degrade into the single-row raw-text fallback in _parse_section_output.
+        extra += " Keep responding with ONLY a JSON array of row objects in the same table format as before -- do not switch to prose."
     prompt = _section_prompt(plan, section, extra_instruction=extra)
     raw = await asyncio.to_thread(llm.generate, SECTION_SYSTEM_PROMPT, prompt, False)
     content = _parse_section_output(raw, section)

@@ -45,9 +45,9 @@ class LLMClient(ABC):
     def generate(self, system: str, user: str, json_mode: bool = False) -> str:
         """Public entry point used by planner/executor/reflection.
 
-        Wraps ``_call`` with exponential-backoff retries, since free-tier
-        hosted models and local models both occasionally time out or
-        rate-limit. Raises ``LLMError`` only after every attempt has failed.
+        Wraps ``_call`` with backoff retries, since free-tier hosted models
+        and local models both occasionally time out or rate-limit. Raises
+        ``LLMError`` only after every attempt has failed.
         """
         last_err: Optional[Exception] = None
         for attempt in range(1, config.LLM_MAX_RETRIES + 2):  # e.g. 1 try + 2 retries
@@ -55,13 +55,37 @@ class LLMClient(ABC):
                 return self._call(system, user, json_mode)
             except Exception as e:
                 last_err = e
-                # Exponential backoff with jitter, capped at 8s, so retries
-                # don't hammer a struggling provider in lock-step.
-                wait = min(2 ** attempt + random.random(), 8)
+                wait = self._retry_after_seconds(e)
+                if wait is None:
+                    # Exponential backoff with jitter, capped at 8s, so retries
+                    # don't hammer a struggling provider in lock-step.
+                    wait = min(2 ** attempt + random.random(), 8)
                 logger.warning("[%s] generate() attempt %d failed: %s -- retrying in %.1fs",
                                 self.name, attempt, e, wait)
                 time.sleep(wait)
         raise LLMError(f"{self.name} failed after retries: {last_err}")
+
+    @staticmethod
+    def _retry_after_seconds(err: Exception) -> Optional[float]:
+        """If the failure was an HTTP 429 that told us exactly how long to
+        wait (a ``Retry-After`` header), honour that instead of guessing with
+        generic exponential backoff -- a free-tier rate limit (observed with
+        Groq) resets on its own schedule, and a guessed backoff shorter than
+        that just wastes the retry on another 429. Falls back to the
+        exponential schedule for anything else (timeouts, connection errors,
+        or a 429 with no header)."""
+        response = getattr(err, "response", None)
+        if response is None or getattr(response, "status_code", None) != 429:
+            return None
+        retry_after = response.headers.get("retry-after") if hasattr(response, "headers") else None
+        if retry_after is None:
+            return None
+        try:
+            # Capped at 30s so one very long provider-requested wait can't
+            # stall a request beyond what's reasonable for an interactive API.
+            return min(float(retry_after), 30.0) + random.random()
+        except ValueError:
+            return None
 
 
 # ---- Groq -- free-tier hosted inference, OpenAI-compatible REST API --------
@@ -266,16 +290,22 @@ def get_llm_client() -> LLMClient:
     (missing key, network error, local server not running) or unrecognised,
     so the API never becomes totally unusable because of an environment
     misconfiguration.
+
+    The health check goes through ``generate()`` (not a raw ``_call()``) so
+    it gets the same retry/backoff as every other LLM call -- a bare
+    ``_call()`` has zero retries, so a single transient hiccup (e.g. one
+    stray 429 on a rate-limited free tier) would otherwise be enough to
+    silently downgrade an otherwise-healthy provider to MockLLM.
     """
     provider = config.LLM_PROVIDER
     try:
         if provider == "groq":
             client = GroqLLM(config.GROQ_API_KEY, config.GROQ_MODEL)
-            client._call(_HEALTH_CHECK_SYSTEM, _HEALTH_CHECK_USER, json_mode=False)
+            client.generate(_HEALTH_CHECK_SYSTEM, _HEALTH_CHECK_USER, json_mode=False)
             return client
         if provider == "ollama":
             client = OllamaLLM(config.OLLAMA_HOST, config.OLLAMA_MODEL)
-            client._call(_HEALTH_CHECK_SYSTEM, _HEALTH_CHECK_USER, json_mode=False)
+            client.generate(_HEALTH_CHECK_SYSTEM, _HEALTH_CHECK_USER, json_mode=False)
             return client
     except Exception as e:
         logger.warning("Configured provider '%s' unavailable (%s) -- falling back to MockLLM.", provider, e)

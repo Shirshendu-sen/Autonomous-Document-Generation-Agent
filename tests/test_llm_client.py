@@ -69,6 +69,66 @@ def test_generate_raises_llm_error_after_exhausting_retries():
     assert client.calls == config.LLM_MAX_RETRIES + 1
 
 
+# ---- Retry-After-aware backoff on 429s -----------------------------------------
+
+class _FakeResponse:
+    def __init__(self, status_code, headers=None):
+        self.status_code = status_code
+        self.headers = headers or {}
+
+
+def test_retry_after_seconds_honours_header_on_429():
+    import requests
+    err = requests.exceptions.HTTPError("429")
+    err.response = _FakeResponse(429, {"retry-after": "5"})
+    wait = LLMClient._retry_after_seconds(err)
+    assert wait is not None and 5 <= wait <= 6  # + up to 1s jitter
+
+
+def test_retry_after_seconds_caps_extreme_header_value():
+    import requests
+    err = requests.exceptions.HTTPError("429")
+    err.response = _FakeResponse(429, {"retry-after": "9999"})
+    wait = LLMClient._retry_after_seconds(err)
+    assert wait is not None and wait <= 31  # capped at 30s + jitter
+
+
+def test_retry_after_seconds_returns_none_without_header_or_for_non_429():
+    import requests
+    no_header_err = requests.exceptions.HTTPError("429")
+    no_header_err.response = _FakeResponse(429, {})
+    assert LLMClient._retry_after_seconds(no_header_err) is None
+
+    assert LLMClient._retry_after_seconds(ConnectionError("boom")) is None
+
+
+def test_generate_sleeps_for_retry_after_duration_on_429(monkeypatch):
+    import requests
+
+    class _RateLimitedThenOkClient(LLMClient):
+        name = "rate-limited"
+
+        def __init__(self):
+            self.calls = 0
+
+        def _call(self, system, user, json_mode):
+            self.calls += 1
+            if self.calls == 1:
+                err = requests.exceptions.HTTPError("429")
+                err.response = _FakeResponse(429, {"retry-after": "3"})
+                raise err
+            return "ok"
+
+    slept = []
+    monkeypatch.setattr("app.llm_client.time.sleep", lambda seconds: slept.append(seconds))
+
+    client = _RateLimitedThenOkClient()
+    result = client.generate("system", "user")
+    assert result == "ok"
+    assert len(slept) == 1
+    assert 3 <= slept[0] <= 4  # honoured the server's Retry-After, not the exponential guess
+
+
 # ---- Groq / Ollama construction (no network calls made) ----------------------
 
 def test_groq_llm_requires_api_key():
