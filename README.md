@@ -209,7 +209,46 @@ python -m pytest -v
 **Current result: 84 passed.** All tests run against mocks/fakes (`MockLLM`, plus hand-written `LLMClient` subclasses for retry/failure scenarios) — no network access, no `GROQ_API_KEY`, and no local Ollama server required. `tests/test_main.py` includes the two required assignment test cases run through the full in-process pipeline via FastAPI's `TestClient` (pass `-s` to see the printed task list/reflection log for each).
 
 ---
+## 🐞 Debugging Insight
 
+### Issue
+Initially, the application was always using **MockLLM** instead of **Groq**, even though Groq support had already been implemented.
+
+### Root Cause
+The project did not contain a `.env` file, so the configuration defaulted to:
+
+```env
+LLM_PROVIDER=mock
+```
+
+As a result, the LLM factory always returned `MockLLM`, and no real Groq API requests were made.
+
+### Solution
+- Created a `.env` file.
+- Configured:
+  ```env
+  LLM_PROVIDER=groq
+  GROQ_API_KEY=<your_api_key>
+  GROQ_MODEL=llama-3.1-8b-instant
+  ```
+- Restarted the FastAPI server so the new configuration was loaded.
+- Verified that API responses contained:
+  ```json
+  "llm_provider_used": "groq"
+  ```
+- Confirmed the generated `.docx` contained real AI-generated content instead of placeholder/mock text.
+
+### Additional Fix
+The automated test suite was unintentionally reading the local `.env` file, causing tests to use the live Groq API.
+
+To keep the tests deterministic and offline:
+- Test configuration was isolated from the runtime configuration.
+- Tests always use **MockLLM**.
+- Runtime uses **Groq** when configured.
+
+### Outcome
+- Runtime uses **Groq** for live demonstrations.
+- Automated tests remain fast, deterministic, and independent of external APIs.
 ## 🌐 API Endpoints
 
 | Method | Path | Description |
